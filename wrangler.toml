@@ -9,4 +9,4 @@ database_name = "maya-memory"
 database_id = "eb218c25-3292-4bb9-b5c8-3b3825cb9f57"
 
 [vars]
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"
