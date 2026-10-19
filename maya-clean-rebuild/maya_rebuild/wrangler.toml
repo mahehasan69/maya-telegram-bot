@@ -1,0 +1,11 @@
+name = "kokoro-whatsapp"
+main = "src/index.js"
+compatibility_date = "2026-10-17"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "kokoro-memory"
+database_id = "a2180ecd-6f4a-47e0-8732-c0716215a4c6"
+
+[vars]
+GROQ_MODEL = "llama-3.3-70b-versatile"
