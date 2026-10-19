@@ -4,8 +4,8 @@ compatibility_date = "2026-10-17"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "kokoro-memory"
-database_id = "a2180ecd-6f4a-47e0-8732-c0716215a4c6"
+database_name = "maya-memory"
+database_id = "eb218c25-3292-4bb9-b5c8-3b3825cb9f57"
 
 [vars]
 GROQ_MODEL = "llama-3.3-70b-versatile"
