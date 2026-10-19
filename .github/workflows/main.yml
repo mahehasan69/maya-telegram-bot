@@ -1,31 +1,26 @@
 
-name: Deploy Maya to Cloudflare
+name: Connect Maya Telegram Webhook
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
-  deploy:
+  setup-webhook:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Install Wrangler
-        run: npm install --global wrangler
-
-      - name: Deploy Worker
-        run: wrangler deploy
+      - name: Register Telegram webhook
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WORKER_URL: https://maya-telegram-bot.mahehassan69.workers.dev
+          WEBHOOK_SETUP_KEY: ${{ secrets.WEBHOOK_SETUP_KEY }}
+        run: |
+          if [ -z "$WEBHOOK_SETUP_KEY" ]; then
+            echo "Missing WEBHOOK_SETUP_KEY GitHub secret."
+            exit 1
+          fi
+
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url "${WORKER_URL}/setup" \
+            --header "X-Setup-Key: ${WEBHOOK_SETUP_KEY}" \
+            --header "Content-Type: application/json"
+
