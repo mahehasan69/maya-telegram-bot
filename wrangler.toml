@@ -1,4 +1,5 @@
-name = "kokoro-whatsapp"
+
+name = "maya-telegram-bot"
 main = "src/index.js"
 compatibility_date = "2026-10-17"
 
