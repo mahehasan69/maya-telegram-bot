@@ -7,18 +7,16 @@ binding = "DB"
 database_name = "maya-memory"
 database_id = "eb218c25-3292-4bb9-b5c8-3b3825cb9f57"
 
-[vars]
-GROQ_MODEL = "openai/gpt-oss-120b"
-
-# Workers AI (creates the memory embeddings)
 [ai]
 binding = "AI"
 
-# Long-term searchable memory
 [[vectorize]]
 binding = "VECTORIZE"
 index_name = "maya-memory"
 
-# Daily trigger for opt-in /checkin messages (13:30 UTC)
+[vars]
+GROQ_MODEL = "openai/gpt-oss-120b"
+OWNER_TELEGRAM_ID = "6482847116"
+
 [triggers]
 crons = ["30 13 * * *"]
