@@ -18,7 +18,7 @@ const STYLES = {
 const RATE_LIMIT_PER_MIN = 12;
 const HISTORY_LIMIT = 16;
 const MEMORY_EVERY_N = 8;
-const FALLBACK_MODEL = "llama-3.3-70b-versatile";
+const FALLBACK_MODEL = "openai/gpt-oss-120b";
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
