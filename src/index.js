@@ -18,7 +18,7 @@ const STYLES = {
 const RATE_LIMIT_PER_MIN = 12;
 const HISTORY_LIMIT = 16;
 const MEMORY_EVERY_N = 8;
-const FALLBACK_MODEL = "openai/gpt-oss-120b";
+const FALLBACK_MODEL = "llama-3.3-70b-versatile";
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -96,7 +96,6 @@ async function setupWebhook(request, env) {
       { command: "name", description: "Tell Maya what to call you" },
       { command: "memory", description: "See what Maya remembers" },
       { command: "checkin", description: "Daily check-in on/off" },
-      { command: "reset", description: "Clear recent chat" },
       { command: "forget", description: "Erase everything Maya knows" },
       { command: "help", description: "Show help" },
     ],
@@ -155,19 +154,26 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    await saveMessage(env, userKey, "user", fromVoice ? `[voice] ${text}` : text, messageId);
+    const userRowId = await saveMessage(env, userKey, "user", fromVoice ? `[voice] ${text}` : text, messageId);
     await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
 
     const profile = await getProfile(env, userKey);
     const history = await getHistory(env, userKey);
-    const answer = await askGroq(env, history, profile);
+    const recalled = await recallEpisodes(env, userKey, text); // old moments related to this message
+    const answer = await askGroq(env, history, profile, recalled);
 
     await saveMessage(env, userKey, "assistant", answer, null);
     await sendBubbles(env, chatId, answer);
 
+    // Save this exchange into long-term searchable memory.
+    await storeEpisode(env, userKey, userRowId, text, answer);
+
     // Periodically refresh long-term memory.
     const count = await bumpCount(env, userKey);
-    if (count % MEMORY_EVERY_N === 0) await updateMemory(env, userKey);
+    if (count % MEMORY_EVERY_N === 0) {
+      await updateMemory(env, userKey);
+      await maybeSummarize(env, userKey);
+    }
   } catch (error) {
     console.error("Update failed", String(error), error?.stack || "");
     const chatId = update?.message?.chat?.id || update?.callback_query?.message?.chat?.id;
@@ -185,14 +191,14 @@ async function handleCommand(env, { cmd, arg, chatId, userKey, text, messageId, 
       const name = from.first_name ? ` ${from.first_name}` : "";
       await sendTelegram(
         env, chatId,
-        `Heyyy${name} 💗 I'm Maya, your AI companion! Tell me about your day, or just come say hi. You can pick my vibe with /style.`
+        `Heyyy${name} 💗 I'm Maya, your AI companion! Tell me about your day, or just come say hi. You can pick my vibe with /style.\n\n🔒 Just so you know: I remember our conversations so I can know you better. You can see what I remember with /memory and erase everything anytime with /forget.`
       );
       return true;
     }
     case "help":
       await sendTelegram(
         env, chatId,
-        "💗 Maya commands\n/style — change my personality\n/name <name> — tell me what to call you\n/memory — see what I remember\n/checkin on|off — daily check-in message\n/reset — clear recent chat\n/forget — erase everything I know about you\n\nYou can also send voice notes 🎤"
+        "💗 Maya commands\n/style — change my personality\n/name <name> — tell me what to call you\n/memory — see what I remember\n/checkin on|off — daily check-in message\n/forget — erase everything I remember about you\n\nYou can also send voice notes 🎤"
       );
       return true;
     case "style":
@@ -240,13 +246,13 @@ async function handleCommand(env, { cmd, arg, chatId, userKey, text, messageId, 
       return true;
     }
     case "reset":
-      await env.DB.prepare("DELETE FROM messages WHERE wa_id = ?").bind(userKey).run();
-      await sendTelegram(env, chatId, "Fresh start 💗 I cleared our recent chat (I still remember the basics — use /forget to erase everything).");
+      await sendTelegram(env, chatId, "I keep all our memories safe 💗 If you ever want me to erase everything, use /forget.");
       return true;
     case "forget":
+      await deleteAllEpisodes(env, userKey);
       await env.DB.batch([
         env.DB.prepare("DELETE FROM messages WHERE wa_id = ?").bind(userKey),
-        env.DB.prepare("UPDATE profiles SET facts = '[]', name = NULL, msg_count = 0, style = 'sweet' WHERE user_key = ?").bind(userKey),
+        env.DB.prepare("UPDATE profiles SET facts = '[]', name = NULL, msg_count = 0, style = 'sweet', summary = '', summary_upto = 0 WHERE user_key = ?").bind(userKey),
       ]);
       await sendTelegram(env, chatId, "Done. I've erased everything I knew about you 💗");
       return true;
@@ -293,7 +299,7 @@ async function bumpCount(env, userKey) {
 function parseFacts(raw) {
   try {
     const arr = JSON.parse(raw || "[]");
-    return Array.isArray(arr) ? arr.filter(f => typeof f === "string").slice(0, 30) : [];
+    return Array.isArray(arr) ? arr.filter(f => typeof f === "string").slice(0, 60) : [];
   } catch {
     return [];
   }
@@ -311,7 +317,7 @@ async function updateMemory(env, userKey) {
         {
           role: "system",
           content:
-            "You maintain a short memory list about a user for a friendly chat companion. Given existing facts and a recent conversation, return ONLY a JSON array of at most 25 short strings: stable things worth remembering (name, work/school, hobbies, important people, goals, preferences, upcoming events). Merge duplicates and drop outdated items. Never store passwords, card/ID numbers, addresses, or other sensitive data.",
+            "You maintain a short memory list about a user for a friendly chat companion. Given existing facts and a recent conversation, return ONLY a JSON array of at most 60 short strings: stable things worth remembering (name, work/school, hobbies, important people, goals, preferences, important life events, upcoming events) and also notes on how this user likes to be talked to (language mix, humor, tone, topics they love or avoid). Merge duplicates, keep important old facts, and drop only clearly outdated items. Never store passwords, card/ID numbers, addresses, or other sensitive data.",
         },
         {
           role: "user",
@@ -331,12 +337,133 @@ async function updateMemory(env, userKey) {
   }
 }
 
-function buildSystemPrompt(profile) {
+function buildSystemPrompt(profile, recalled = []) {
   const parts = [BASE_PROMPT, STYLES[profile?.style] || STYLES.sweet];
   if (profile?.name) parts.push(`The user's name is ${profile.name}.`);
   const facts = parseFacts(profile?.facts);
   if (facts.length) parts.push("Things you remember about the user:\n" + facts.map(f => `- ${f}`).join("\n"));
+  if (profile?.summary) parts.push("The story of your relationship and the user's life so far:\n" + profile.summary);
+  if (recalled.length) {
+    parts.push(
+      "Older moments from your past chats that may be relevant (mention only if it fits naturally, never recite them):\n" +
+        recalled.map(r => `- (${r.when}) ${r.text}`).join("\n")
+    );
+  }
   return parts.join("\n\n");
+}
+
+/* ───────────────────────── Rolling life summary ───────────────────────── */
+
+// Compresses older chat (outside the live window) into a short "life story",
+// so even years of history fit in the prompt.
+async function maybeSummarize(env, userKey) {
+  try {
+    const profile = await getProfile(env, userKey);
+    const upto = profile?.summary_upto || 0;
+
+    const newest = await env.DB.prepare(
+      "SELECT id FROM messages WHERE wa_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?"
+    ).bind(userKey, HISTORY_LIMIT).first();
+    if (!newest) return;
+
+    const rows = await env.DB.prepare(
+      "SELECT id, role, content FROM messages WHERE wa_id = ? AND id > ? AND id <= ? ORDER BY id LIMIT 200"
+    ).bind(userKey, upto, newest.id).all();
+    const msgs = rows.results || [];
+    if (msgs.length < 40) return; // wait until there is enough new material
+
+    const raw = await callGroq(
+      env,
+      [
+        {
+          role: "system",
+          content:
+            "You keep a running life-story summary about a user for a chat companion. Merge the existing summary with the new conversation into an updated summary of at most 250 words: key life events, relationships, struggles, achievements, recurring topics, emotional patterns, and shared memories or inside jokes. Keep important old details. Write in third person, plain text only. Never include passwords, card/ID numbers or other sensitive data.",
+        },
+        {
+          role: "user",
+          content: `Existing summary:\n${profile?.summary || "(none yet)"}\n\nNew conversation:\n${msgs.map(m => `${m.role === "user" ? "User" : "Maya"}: ${m.content.slice(0, 400)}`).join("\n")}`,
+        },
+      ],
+      { max_tokens: 500, temperature: 0.3 }
+    );
+    if (!raw) return;
+
+    await env.DB.prepare("UPDATE profiles SET summary = ?, summary_upto = ? WHERE user_key = ?")
+      .bind(raw.slice(0, 2500), msgs[msgs.length - 1].id, userKey).run();
+  } catch (error) {
+    console.error("maybeSummarize failed", String(error));
+  }
+}
+
+/* ───────────────────────── Long-term episodic memory (Vectorize) ───────────────────────── */
+
+const EMBED_MODEL = "@cf/baai/bge-m3"; // multilingual (works with Bangla/English), 1024 dims
+
+function memoryEnabled(env) {
+  return Boolean(env.AI && env.VECTORIZE);
+}
+
+async function embed(env, text) {
+  const res = await env.AI.run(EMBED_MODEL, { text: [text.slice(0, 2000)] });
+  return res?.data?.[0] || null;
+}
+
+function timeAgo(ts) {
+  const days = Math.floor((Date.now() - ts) / 86400000);
+  if (days < 1) return "earlier today";
+  if (days === 1) return "yesterday";
+  if (days < 30) return `${days} days ago`;
+  if (days < 365) return `${Math.floor(days / 30)} months ago`;
+  return `${Math.floor(days / 365)} years ago`;
+}
+
+async function storeEpisode(env, userKey, rowId, userText, answer) {
+  if (!memoryEnabled(env) || !rowId) return;
+  try {
+    const text = `User: ${userText}\nMaya: ${answer}`.slice(0, 900);
+    const values = await embed(env, text);
+    if (!values) return;
+    await env.VECTORIZE.upsert([
+      { id: `${userKey}:${rowId}`, values, metadata: { user_key: userKey, ts: Date.now(), text } },
+    ]);
+  } catch (error) {
+    console.error("storeEpisode failed", String(error));
+  }
+}
+
+async function recallEpisodes(env, userKey, query) {
+  if (!memoryEnabled(env) || query.length < 4) return [];
+  try {
+    const values = await embed(env, query);
+    if (!values) return [];
+    const res = await env.VECTORIZE.query(values, {
+      topK: 8,
+      filter: { user_key: userKey },
+      returnMetadata: "all",
+    });
+    const recentCutoff = Date.now() - 30 * 60 * 1000; // skip what's already in short-term history
+    return (res?.matches || [])
+      .filter(m => m.score >= 0.55 && m.metadata?.ts < recentCutoff)
+      .slice(0, 4)
+      .map(m => ({ when: timeAgo(m.metadata.ts), text: String(m.metadata.text).replace(/\n/g, " | ") }));
+  } catch (error) {
+    console.error("recallEpisodes failed", String(error));
+    return [];
+  }
+}
+
+async function deleteAllEpisodes(env, userKey) {
+  if (!memoryEnabled(env)) return;
+  try {
+    const rows = await env.DB.prepare("SELECT id FROM messages WHERE wa_id = ? AND role = 'user'").bind(userKey).all();
+    const ids = (rows.results || []).map(r => `${userKey}:${r.id}`);
+    for (let i = 0; i < ids.length; i += 100) {
+      await env.VECTORIZE.deleteByIds(ids.slice(i, i + 100));
+    }
+  } catch (error) {
+    console.error("deleteAllEpisodes failed", String(error));
+  }
 }
 
 /* ───────────────────────── Rate limiting ───────────────────────── */
@@ -375,9 +502,10 @@ async function getHistory(env, userKey, limit = HISTORY_LIMIT) {
 }
 
 async function saveMessage(env, userKey, role, content, messageId) {
-  await env.DB.prepare(
+  const res = await env.DB.prepare(
     "INSERT INTO messages (wa_id, role, content, whatsapp_message_id) VALUES (?, ?, ?, ?)"
   ).bind(userKey, role, content, messageId).run();
+  return res?.meta?.last_row_id;
 }
 
 /* ───────────────────────── Groq ───────────────────────── */
@@ -411,8 +539,8 @@ async function callGroq(env, messages, { model, max_tokens = 400, temperature = 
   }
 }
 
-async function askGroq(env, history, profile) {
-  const messages = [{ role: "system", content: buildSystemPrompt(profile) }, ...history];
+async function askGroq(env, history, profile, recalled = []) {
+  const messages = [{ role: "system", content: buildSystemPrompt(profile, recalled) }, ...history];
   let answer = await callGroq(env, messages);
   if (!answer) answer = await callGroq(env, messages, { model: FALLBACK_MODEL }); // fallback model
   return answer || "I'm having a little trouble thinking right now 😥 Can you message me again in a moment?";
