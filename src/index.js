@@ -455,7 +455,6 @@ async function recallEpisodes(env, userKey, query) {
     if (!values) return [];
     const res = await env.VECTORIZE.query(values, {
       topK: 8,
-      filter: { user_key: userKey },
       returnMetadata: "all",
     });
     const recentCutoff = Date.now() - 30 * 60 * 1000; // skip what's already in short-term history
