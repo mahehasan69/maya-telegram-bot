@@ -18,7 +18,7 @@ const STYLES = {
 const RATE_LIMIT_PER_MIN = 12;
 const HISTORY_LIMIT = 16;
 const MEMORY_EVERY_N = 8;
-const FALLBACK_MODEL = "openai/gpt-oss-120b";
+const FALLBACK_MODEL = "llama-3.3-70b-versatile";
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -116,6 +116,16 @@ async function handleUpdate(update, env) {
 
     const chatId = message.chat.id;
     const userId = message.from.id;
+
+    // Private bot: fail closed until OWNER_TELEGRAM_ID is set, then answer only the owner.
+    if (!env.OWNER_TELEGRAM_ID) {
+      await tg(env, "sendMessage", {
+        chat_id: chatId,
+        text: `Setup step 🔧 Your Telegram ID is ${userId}. Set it as OWNER_TELEGRAM_ID in wrangler.toml and redeploy.`,
+      });
+      return;
+    }
+    if (!isOwner(env, userId) || message.chat.type !== "private") return;
     const userKey = `tg:${chatId}:${userId}`;
     const messageId = update.update_id === undefined ? null : `telegram:${update.update_id}`;
 
@@ -261,7 +271,13 @@ async function handleCommand(env, { cmd, arg, chatId, userKey, text, messageId, 
   }
 }
 
+function isOwner(env, userId) {
+  const allowed = String(env.OWNER_TELEGRAM_ID || "").split(",").map(s => s.trim()).filter(Boolean);
+  return allowed.includes(String(userId));
+}
+
 async function handleCallback(cb, env) {
+  if (!isOwner(env, cb.from?.id)) return;
   const chatId = cb.message?.chat?.id;
   const userKey = chatId ? `tg:${chatId}:${cb.from.id}` : null;
   await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
