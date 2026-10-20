@@ -17,6 +17,7 @@ index_name = "maya-memory"
 [vars]
 GROQ_MODEL = "openai/gpt-oss-120b"
 OWNER_TELEGRAM_ID = "6482847116"
-
+MAYA_BRAIN_URL = "https://maya-brain-v1.mahehassan69.workers.dev"
+MAYA_BRAIN_ENABLED = "false"
 [triggers]
 crons = ["30 13 * * *"]
